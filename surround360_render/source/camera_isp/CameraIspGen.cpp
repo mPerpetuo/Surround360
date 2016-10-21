@@ -13,8 +13,8 @@ class CameraIspGen
  protected:
   Target target;
   Var x, y, c, yi, yo;
-  Func toneCorrected;
-  Func ispOutput;
+  //Func toneCorrected;
+  //Func ispOutput;
 
   // Average two positive values rounding up
   Expr avg(Expr a, Expr b) {
@@ -195,7 +195,6 @@ class CameraIspGen
       select(greenRedPixel(),  avg(absd(rawGreenR(x2, y), rawGreenR(x,   y)), absd(rawGreenR(x_2, y), rawGreenR(x, y))), // green on red row
       0))));
 
-
     // Homogenity calulation over a diameter size region
     const int w = 2;
     const int diameter = 2*w + 1;
@@ -210,28 +209,29 @@ class CameraIspGen
     // the gradient is orthogonal to the direction of the local
     // feature.
     Func hCount("hCount");
-    hCount(x, y) = sum(cast<int>(dH(xp, yp) <= dV(xp, yp)));
+    hCount(x, y) = sum(cast<int>(dH(xp,yp) < dV(xp,yp)), "hCount_sum");
 
     // The local green estimate is a blend the horizontal and vertical
     // green channel estimate based on how horizontal or vertical the
     // region is.
     Expr alpha = cast<float>(hCount(x, y)) / float(diameter * diameter);
-    Func g;
-    g(x, y) = lerp(gV(x, y), gH(x, y), alpha);
 
+    Func g("green");
+    g(x, y) = lerp(gV(x, y), gH(x, y), alpha);
+    
     // We take the log of green channel which helps to supress chroma
     // ringing and noise.
-    Func gp;
+    Func gp("log green");
     gp(x, y) = log(1.0f + g(x, y));
 
     // Red and blue minus the log of the green channel
-    Func rmg, bmg;
+    Func rmg("rmg"), bmg("bmg");
     rmg(x, y) = rawRed(x, y) - gp(x, y);
     bmg(x, y) = rawBlue(x, y) - gp(x, y);
 
     // Use local box style filtering to estimate r-g and b-g
     // channels. Adding the g channel back in.
-    Func r, b;
+    Func r("r"), b("b");
     r(x, y) =
       select(redPixel(),       (rmg(x, y) + rmg(x, y2) + rmg(x, y_2) + rmg(x2, y) + rmg(x_2, y)) / 5.0f,
       select(greenRedPixel(),  (rmg(x_1, y_2) + rmg(x_1, y) + rmg(x_1, y2) + rmg(x1, y_2) + rmg(x1, y) + rmg(x1, y2)) / 6.0f,
@@ -253,44 +253,6 @@ class CameraIspGen
           c == 0, r(x, y),
           c == 1, g(x, y),
           b(x, y));
-
-    int kVec = target.natural_vector_size(Float(32));
-
-    gV.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    gH.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    dV.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .parallel(y)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    dH.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    g.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    r.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
-
-    b.compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .fold_storage(y, 64);
   }
 
   Func demosaic(
@@ -370,14 +332,6 @@ class CameraIspGen
           demosaiced);
     }
 
-    int kVec = target.natural_vector_size(Float(32));
-
-    demosaiced
-      .compute_at(toneCorrected, x)
-      .vectorize(x, kVec, TailStrategy::RoundUp)
-      .reorder(y, x, c)
-      .unroll(c);
-
     return demosaiced;
   }
 
@@ -403,53 +357,28 @@ class CameraIspGen
     return corrected;
   }
 
-  Func lp(
+
+  Func gaussian_blur(Func input) {
+    Func k("gaussian_params"), gaussian_x("gaussian_x"), gaussian_y("gaussian_y");
+    RDom r(-2,5);
+
+    k(x) = 0;
+    k(-2) = 1;    k(-1) = 3;   k(0) = 7;   k(1) = 3;  k(2)= 1;
+    gaussian_x(x,y,c) = sum(input(x+r.x, y, c) *  k(r)) / 15;
+    gaussian_y(x,y,c) = sum(gaussian_x(x, y+r, c) * k(r)) / 15;
+
+    return gaussian_y;
+  }
+
+  
+  Func lp_2d_fast(
       Func input,
       Expr height) {
-    const float alpha = powf(0.25f, 1.0f/4.0f);
-    const float alphaComp = 1.0f - alpha;
 
-    Func blur("blur");
-    // Classic exponetially weighted two-tap IIR filter
-    blur(x, y, c) = undef<float>(); // Pure function init
-    blur(x, 0, c) = cast<float>(input(x, 0, c)); // Seed the first value
+    Func out("gaussian_2d");
+    out = gaussian_blur(input);
 
-    RDom ry(1, height - 1);
-    Expr yp = height - 1 - ry;
-
-    // Causal pass
-    blur(x, ry, c) = blur(x, ry - 1, c) * alpha + cast<float>(input(x, ry, c)) * alphaComp;
-    // Anti-causal pass
-    blur(x, yp, c) = blur(x, yp + 1, c) * alpha + blur(x, yp, c) * alphaComp;
-
-    Func transpose("transpose");
-    transpose(x, y, c) = blur(y, x, c);
-
-    const int kVec = target.natural_vector_size(Float(32));
-    Var xo, xi, yo, yi, si;
-    transpose
-      .compute_root()
-      .tile(x, y, xo, yo, x, y, 8, 8)
-      .vectorize(x, kVec)
-      .parallel(yo)
-      .parallel(c);
-
-    blur.
-      compute_at(transpose, yo);
-
-    blur
-      .update(1)
-      .reorder(c, x, ry)
-      .unroll(c)
-      .vectorize(x);
-
-    blur
-      .update(2)
-      .reorder(c, x, ry)
-      .unroll(c)
-      .vectorize(x);
-
-    return transpose;
+    return out;
   }
 
   Func applyUnsharpMask(
@@ -459,13 +388,13 @@ class CameraIspGen
       Expr sR,
       Expr sG,
       Expr sB,
-      Param<bool> BGR,
+      Param<int> BGR,
       int outputBpp) {
 
     Func lowPass("lowPass");
     Func lowPass0("lowPass0");
-    lowPass0 = lp(input, height);
-    lowPass = lp(lowPass0, width);
+
+    lowPass = lp_2d_fast(BoundaryConditions::mirror_image(input,0,width,0,height), height);
 
     Func highPass("hp");
     highPass(x, y, c) =  cast<float>(input(x, y, c)) - lowPass(x, y, c);
@@ -473,29 +402,26 @@ class CameraIspGen
     Expr cp = select(BGR == 0, c, 2 - c);
     const int range = (1 << outputBpp) - 1;
 
-    Expr outputVal =
-      clamp(
-          lowPass(x, y, cp) + highPass(x, y, cp) *
-          select(cp == 0, sR, cp == 1, sG, sB),
-          0, range);
+    Func unsharp("unsharp");
+    unsharp(x,y,c) = lowPass(x,y,c) + highPass(x,y,c) * select(cp == 0, sR,
+							       cp == 1, sG,
+							       sB);
+    
+    Func outputVal("outputVal");
+    outputVal(x,y,c) = clamp( unsharp(x,y,c), 0, range );
 
-    Func sharpened("sharpi");
+    Func sh("sh");
+    sh(x,y,c) = outputVal(x,y,c);
+
+    Expr shr;
+    shr  = sh(x,y,c);
+    
+    Func sharpened("sharpened");
     if (outputBpp == 8) {
-      sharpened(x, y, c) = cast<uint8_t>(outputVal);
+      sharpened(x, y, c) = cast<uint8_t>(shr);
     } else {
-      sharpened(x, y, c) = cast<uint16_t>(outputVal);
+      sharpened(x, y, c) = cast<uint16_t>(shr);
     }
-
-    const int kStripSize = 32;
-    const int kVec = target.natural_vector_size(Float(32));
-    Var xo, xi;
-
-    sharpened
-      .compute_root()
-      .split(y, yo, yi, kStripSize)
-      .vectorize(yi, kVec)
-      .parallel(yo)
-      .parallel(c);
 
     return sharpened;
   }
@@ -519,7 +445,7 @@ class CameraIspGen
       Param<float> sharpenningB,
       ImageParam ccm,
       ImageParam toneTable,
-      Param<bool> BGR,
+      Param<int> BGR,
       int outputBpp) {
 
     this->target = target;
@@ -535,45 +461,30 @@ class CameraIspGen
     Func sharpened("sharpened");
 
     deinterleaved = deinterleave(raw);
-    demosaiced     = demosaic(deinterleaved, vignetteTableH, vignetteTableV, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR, whiteBalanceGainG, whiteBalanceGainB);
+    deinterleaved.compute_root();
+    
+    demosaiced = demosaic(deinterleaved, vignetteTableH, vignetteTableV, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR, whiteBalanceGainG, whiteBalanceGainB);
+
     colorCorrected = applyCCM(demosaiced, ccm);
+    Func toneCorrected("toneCorrected");
     toneCorrected(x, y, c) = toneTable(c, colorCorrected(x, y, c));
 
+    demosaiced.compute_root();
+    toneCorrected.compute_root();
+    
+    Func ispOutput("IspOutput");
     if (Fast) {
       Expr cp = select(BGR == 0, c, 2 - c);
       ispOutput(x, y, c) = toneCorrected(x , y, cp);
     } else {
       ispOutput = applyUnsharpMask(toneCorrected, width, height, sR, sG, sB, BGR, outputBpp);
     }
-
-    // Schedule it using local vars
-    Var yii("yii"), xi("xi");
-
-    const int kStripSize = 32;
-    const int kVec = target.natural_vector_size(Int(16));
-
-    deinterleaved
-      .compute_at(toneCorrected, yi)
-      .store_at(toneCorrected, yo)
-      .vectorize(x, 2 * kVec, TailStrategy::RoundUp)
-      .reorder(c, x, y)
-      .unroll(c);
-
-    toneCorrected
-      .compute_root()
-      .split(y, yo, yi, kStripSize)
-      .split(yi, yi, yii, 2)
-      .split(x, x, xi, 2*kVec, TailStrategy::RoundUp)
-      .reorder(xi, c, yii, x, yi, yo)
-      .vectorize(xi, 2 * kVec)
-      .parallel(yo);
-
-    ispOutput
-      .output_buffer()
-      .set_stride(0, 3)
-      .set_stride(2, 1)
-      .set_bounds(2, 0, 3);
-
+    
+    ispOutput.output_buffer()
+      .set_stride(0,3)
+      .set_stride(2,1)
+      .set_bounds(2,0,3);
+    
     return ispOutput;
   }
 
@@ -600,11 +511,16 @@ int main(int argc, char **argv) {
   Param<float> sharpenningB("sharpenninngB");
   ImageParam ccm(Float(32), 2, "ccm");
   ImageParam toneTable(UInt(FLAGS_output_bpp), 2, "toneTable");
-  Param<bool> BGR;
+  Param<int> BGR;
+  
 
   // Pick a target architecture
   Target target = get_target_from_environment();
 
+  target.set_feature( Target::Debug, true);
+  target.set_feature( Target::Profile, true);
+  target.set_feature( Target::OpenCL, true );
+  
   // Build variants of the pipeline
   CameraIspGen<false> cameraIspGen;
   CameraIspGen<true> cameraIspGenFast;
@@ -618,11 +534,13 @@ int main(int argc, char **argv) {
   Func vignetteTableVM("vvm");
   vignetteTableVM = BoundaryConditions::mirror_image(vignetteTableV);
 
-  Func cameraIsp = cameraIspGen.generate(
+  Func cameraIsp("cameraIsp");
+  cameraIsp = cameraIspGen.generate(
       target, rawM, width, height, vignetteTableHM, vignetteTableVM, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR,
       whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTable, BGR, FLAGS_output_bpp);
 
-  Func cameraIspFast =
+  Func cameraIspFast("cameraIspFast");
+  cameraIspFast =
     cameraIspGenFast.generate(
         target, rawM, width, height, vignetteTableHM, vignetteTableVM, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR,
         whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTable, BGR, FLAGS_output_bpp);
@@ -634,11 +552,13 @@ int main(int argc, char **argv) {
   // Compile the pipelines
   // Use to cameraIsp.print_loop_nest() here to debug loop unrolling
   std::cout << "Halide: " << "Generating " << FLAGS_output_bpp << " bit isp" << std::endl;
-  cameraIsp.compile_to_static_library("CameraIspGen" + to_string(FLAGS_output_bpp), args, target);
+  cameraIsp.compile_to_static_library("CameraIspGen" + to_string(FLAGS_output_bpp), args, "CameraIspGen" + to_string(FLAGS_output_bpp) , target);
   cameraIsp.compile_to_assembly("CameraIspGen" + to_string(FLAGS_output_bpp) + ".s", args, target);
+  cameraIsp.compile_to_lowered_stmt("CameraIspGen" + to_string(FLAGS_output_bpp) + ".html", args, HTML , target);
 
+  
   std::cout << "Halide: " << "Generating " << FLAGS_output_bpp << " bit fastest isp" << std::endl;
-  cameraIspFast.compile_to_static_library("CameraIspGenFast" + to_string(FLAGS_output_bpp), args, target);
+  cameraIspFast.compile_to_static_library("CameraIspGenFast" + to_string(FLAGS_output_bpp), args, "CameraIspGenFast" + to_string(FLAGS_output_bpp) , target);
   cameraIspFast.compile_to_assembly("CameraIspGenFast" + to_string(FLAGS_output_bpp) + ".s", args, target);
   return EXIT_SUCCESS;
 }

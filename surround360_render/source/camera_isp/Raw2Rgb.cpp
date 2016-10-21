@@ -12,6 +12,8 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <ctime>
+#include <chrono>
 
 #include "CameraIsp.h"
 #ifdef USE_HALIDE
@@ -140,16 +142,36 @@ int main(int argc, char* argv[]) {
 
 #ifdef USE_HALIDE
     if (FLAGS_accelerate) {
+      std::cout << "Running Halide Pipeline" << std::endl;
       CameraIspPipe cameraIsp(json, FLAGS_fast, FLAGS_output_bpp);
+      using ns = chrono::nanoseconds;
+      using get_time = chrono::steady_clock;
+
+      auto begin = get_time::now();
+
       runPipeline(&cameraIsp, inputImage16, outputImage, FLAGS_output_image_path);
+
+      auto end = get_time::now();
+
+      auto diff = end - begin;
+
+      std::cout << "Elapsed time " << (float)chrono::duration_cast<ns>(diff).count() / 1000000 << std::endl;
+
     } else {
 #else
     {
 #endif
+      std::cout << "Running Regular Pipeline" << std::endl;
       CameraIsp cameraIsp(json, FLAGS_output_bpp);
       cameraIsp.setDemosaicFilter(FLAGS_demosaic_filter);
       cameraIsp.setResize(FLAGS_resize);
+      using ns = chrono::nanoseconds;
+      using get_time = chrono::steady_clock;
+      auto begin = get_time::now();
       runPipeline(&cameraIsp, inputImage16, outputImage, FLAGS_output_image_path);
+      auto end = get_time::now();
+      auto diff = end-begin;
+      std::cout << "Elapsed time " << (float)chrono::duration_cast<ns>(diff).count() / 1000000 << std::endl;
     }
   } else {
     throw VrCamException("Unable to open " + FLAGS_input_image_path);
