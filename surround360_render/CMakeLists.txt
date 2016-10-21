@@ -46,13 +46,13 @@ ADD_CUSTOM_TARGET( _source SOURCES ${SRC} )
 
 ### Halide support
 IF (DEFINED HALIDE_DIR)
-  INCLUDE("${HALIDE_DIR}/../HalideGenerator.cmake")
+  INCLUDE("${HALIDE_DIR}/HalideGenerator.cmake")
 
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DUSE_HALIDE")
 
   FUNCTION(halide_gen_app name folder)
      ADD_EXECUTABLE("${name}" ${ARGN})
-     TARGET_LINK_LIBRARIES("${name}" PRIVATE Halide gflags)
+     TARGET_LINK_LIBRARIES("${name}" PRIVATE Halide dl z tinfo gflags)
      SET_TARGET_PROPERTIES("${name}" PROPERTIES FOLDER "${folder}")
      IF (MSVC)
         SET_TARGET_PROPERTIES("${name}" PROPERTIES LINK_FLAGS "/STACK:8388608,1048576")
@@ -94,13 +94,13 @@ IF (DEFINED HALIDE_DIR)
    halide_gen_app(CameraIspGen "apps" source/camera_isp/CameraIspGen.cpp)
 
    ADD_CUSTOM_COMMAND(OUTPUT "${CMAKE_BINARY_DIR}/CameraIspGen8.h" "${CMAKE_BINARY_DIR}/CameraIspGen8${CMAKE_STATIC_LIBRARY_SUFFIX}"
-                      COMMAND CameraIspGen --output_bpp 8
+                      COMMAND /usr/bin/env HL_DEBUG=1 ${CMAKE_BINARY_DIR}/bin/CameraIspGen --output_bpp 8
                       DEPENDS CameraIspGen
                       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
                       COMMENT "Generating 8 bit Halide CameraIsp header and object file")
 
    ADD_CUSTOM_COMMAND(OUTPUT "${CMAKE_BINARY_DIR}/CameraIspGen16.h" "${CMAKE_BINARY_DIR}/CameraIspGen16${CMAKE_STATIC_LIBRARY_SUFFIX}"
-                      COMMAND CameraIspGen --output_bpp 16
+                      COMMAND /usr/bin/env HL_DEBUG=1 ${CMAKE_BINARY_DIR}/bin/CameraIspGen --output_bpp 16
                       DEPENDS CameraIspGen
                       WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
                       COMMENT "Generating 16 bit Halide CameraIsp header and object file")
@@ -110,16 +110,18 @@ IF (DEFINED HALIDE_DIR)
 
   TARGET_LINK_LIBRARIES(
      Raw2Rgb
-     "${CMAKE_CURRENT_BINARY_DIR}/cameraIspGenFast8${CMAKE_STATIC_LIBRARY_SUFFIX}"
-     "${CMAKE_CURRENT_BINARY_DIR}/cameraIspGen8${CMAKE_STATIC_LIBRARY_SUFFIX}"
-     "${CMAKE_CURRENT_BINARY_DIR}/cameraIspGenFast16${CMAKE_STATIC_LIBRARY_SUFFIX}"
-     "${CMAKE_CURRENT_BINARY_DIR}/cameraIspGen16${CMAKE_STATIC_LIBRARY_SUFFIX}"
+     "${CMAKE_CURRENT_BINARY_DIR}/CameraIspGenFast8${CMAKE_STATIC_LIBRARY_SUFFIX}"
+     "${CMAKE_CURRENT_BINARY_DIR}/CameraIspGen8${CMAKE_STATIC_LIBRARY_SUFFIX}"
+     "${CMAKE_CURRENT_BINARY_DIR}/CameraIspGenFast16${CMAKE_STATIC_LIBRARY_SUFFIX}"
+     "${CMAKE_CURRENT_BINARY_DIR}/CameraIspGen16${CMAKE_STATIC_LIBRARY_SUFFIX}"
      LibVrCamera
      LibJSON
      glog
      gflags
      ${OpenCV_LIBS}
      Halide
+     dl
+     tinfo
   )
 ELSE()
   ADD_EXECUTABLE(Raw2Rgb source/camera_isp/Raw2Rgb.cpp)
