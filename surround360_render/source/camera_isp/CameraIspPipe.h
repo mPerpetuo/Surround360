@@ -19,18 +19,18 @@ using namespace Halide;
 class CameraIspPipe : public CameraIsp {
  protected:
   Mat inputImage;
-  shared_ptr<Buffer<unsigned short,3>>  inputBuffer;
+  shared_ptr<Buffer<void>>  inputBuffer;
   buffer_t* inputBufferBp;
-  shared_ptr<Buffer<unsigned short,3>> outputBuffer;
+  shared_ptr<Buffer<void>> outputBuffer;
   buffer_t* outputBufferBp;
   Mat toneCurveTable;
   Mat vignetteCurveTableH;
   Mat vignetteCurveTableV;
 
-  shared_ptr<Buffer<float,3>> ccMat;
-  shared_ptr<Buffer<unsigned short,3>> toneTable;
-  shared_ptr<Buffer<float,3>> vignetteTableH;
-  shared_ptr<Buffer<float,3>> vignetteTableV;
+  shared_ptr<Buffer<void>> ccMat;
+  shared_ptr<Buffer<void>> toneTable;
+  shared_ptr<Buffer<void>> vignetteTableH;
+  shared_ptr<Buffer<void>> vignetteTableV;
 
   buffer_t* ccMatBp;
   buffer_t* toneTableBp;
@@ -48,7 +48,7 @@ class CameraIspPipe : public CameraIsp {
     *const_cast<float*>(&maxD) = square(width) + square(width);
     *const_cast<float*>(&sqrtMaxD) = sqrt(maxD);
 
-    inputBuffer = shared_ptr<Buffer<unsigned short,3>>(new Buffer<unsigned short,3>(UInt(16), inputImage.data, width, height));
+    inputBuffer = shared_ptr<Buffer<void>>(new Buffer<void>(UInt(16), inputImage.data, width, height, 1, 1));
     inputBufferBp = inputBuffer->raw_buffer();
   }
 
@@ -56,7 +56,7 @@ class CameraIspPipe : public CameraIsp {
     *const_cast<int*>(&width) = xRes;
     *const_cast<int*>(&height) = yRes;
 
-    inputBuffer = shared_ptr<Buffer<unsigned short,3>>(new Buffer<unsigned short,3>(UInt(16), inputImageData, width, height));
+    inputBuffer = shared_ptr<Buffer<void>>(new Buffer<void>(UInt(16), inputImageData, width, height, 1, 1));
     inputBufferBp = inputBuffer->raw_buffer();
     *const_cast<float*>(&halfWidth) = width / 2.0f;
     *const_cast<float*>(&halfHeight) = height / 2.0f;
@@ -108,7 +108,7 @@ class CameraIspPipe : public CameraIsp {
   }
 
   void getImage(uint8_t* outputImageData, const bool swizzle = true) {
-    outputBuffer = shared_ptr<Buffer<unsigned short,3>>(new Buffer<unsigned short,3>(UInt(outputBpp), outputImageData, width, height));
+    outputBuffer = shared_ptr<Buffer<void>>(new Buffer<void>(UInt(outputBpp), outputImageData, width, height, 3, 1));
     outputBufferBp = outputBuffer->raw_buffer();
     outputBufferBp->elem_size = outputBpp / 8;
     outputBufferBp->extent[0] = width;
@@ -165,18 +165,20 @@ class CameraIspPipe : public CameraIsp {
     }
 
     // Marshal these tables into Halide buffers
-    ccMat = shared_ptr<Buffer<float,3>>(new Buffer<float,3>(Float(32), compositeCCM.data, 3, 3));
-    toneTable = shared_ptr<Buffer<unsigned short,3 >>(new Buffer<unsigned short ,3>(UInt(outputBpp), toneCurveTable.data, 3, kToneCurveLutSize));
-    vignetteTableH = shared_ptr<Buffer<float,3>>(new Buffer<float,3>(Float(32), vignetteCurveTableH.data, 3, width));
-    vignetteTableV = shared_ptr<Buffer<float,3>>(new Buffer<float,3>(Float(32), vignetteCurveTableV.data, 3, height));
+    ccMat = shared_ptr<Buffer<void>>(new Buffer<void>(Float(32), compositeCCM.data, 3, 3, 1, 1));
+    toneTable = shared_ptr<Buffer<void>>(new Buffer<void>(UInt(outputBpp), toneCurveTable.data,  3,  kToneCurveLutSize, 1, 1));
+    vignetteTableH = shared_ptr<Buffer<void>>(new Buffer<void>(Float(32), vignetteCurveTableH.data, 3, width, 1, 1));
+    vignetteTableV = shared_ptr<Buffer<void>>(new Buffer<void>(Float(32), vignetteCurveTableV.data, 3, height, 1, 1));
 
     ccMatBp = ccMat->raw_buffer();
     toneTableBp = toneTable->raw_buffer();
     vignetteTableHBp = vignetteTableH->raw_buffer();
     vignetteTableVBp = vignetteTableV->raw_buffer();
-
+    
     // Pull the first image through the pipe
     runPipe(swizzle);
+    // Needed for GPU
+    outputBuffer->copy_to_host();
   }
 
   void getImage(Mat& outputImage, const bool swizzle = true) {

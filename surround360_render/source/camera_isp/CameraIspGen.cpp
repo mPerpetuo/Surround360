@@ -13,7 +13,7 @@ class CameraIspGen
  protected:
   Target target;
   Var x, y, c, yi, yo;
-  //Func toneCorrected;
+  Func toneCorrected;
   //Func ispOutput;
 
   // Average two positive values rounding up
@@ -253,6 +253,34 @@ class CameraIspGen
           c == 0, r(x, y),
           c == 1, g(x, y),
           b(x, y));
+
+#define GPU_BLOCK Var::gpu_blocks()
+#define GPU_THREADS gpu_threads(x,y)
+
+    hCount.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+    
+    dH.unroll(x,2).unroll(y,2);
+    dH.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+    dV.unroll(x,2).unroll(y,2);
+    dV.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
+    gH.unroll(x,2).unroll(y,2);
+    gH.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+    gV.unroll(x,2).unroll(y,2);
+    gV.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
+    r.unroll(x,2).unroll(y,2);
+    r.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
+    b.unroll(x,2).unroll(y,2);
+    b.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
+    g.unroll(x,2).unroll(y,2);
+    g.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
+    rmg.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+    bmg.compute_at(demosaiced, GPU_BLOCK).GPU_THREADS;
+
   }
 
   Func demosaic(
@@ -332,6 +360,11 @@ class CameraIspGen
           demosaiced);
     }
 
+    rawRed.gpu_tile(x,y,16,16).compute_root();
+    rawBlue.gpu_tile(x,y,16,16).compute_root();
+    rawGreenR.gpu_tile(x,y,16,16).compute_root();
+    rawGreenB.gpu_tile(x,y,16,16).compute_root();
+    
     return demosaiced;
   }
 
@@ -358,27 +391,17 @@ class CameraIspGen
   }
 
 
-  Func gaussian_blur(Func input) {
-    Func k("gaussian_params"), gaussian_x("gaussian_x"), gaussian_y("gaussian_y");
-    RDom r(-2,5);
+  Func gaussian_blur(Func in) {
+    Func gaussian("gaussian_func");
+    Func input("gaussian_input");
 
-    k(x) = 0;
-    k(-2) = 1;    k(-1) = 3;   k(0) = 7;   k(1) = 3;  k(2)= 1;
-    gaussian_x(x,y,c) = sum(input(x+r.x, y, c) *  k(r)) / 15;
-    gaussian_y(x,y,c) = sum(gaussian_x(x, y+r, c) * k(r)) / 15;
+    input(x,y,c) = cast<float>(in(x,y,c));
+    
+    gaussian(x,y,c) = (input(x-1,y-1,c) + input(x,y-1,c-1)*2 + input(x+1,y-1,c) +
+		       input(x-1,y,c)*2 + input(x,y,c)*4     + input(x+1,y,c)*2 +
+		       input(x-1,y+1,c) + input(x,y+1,c+1)*2 + input(x+1,y+1,c) ) / 16;
 
-    return gaussian_y;
-  }
-
-  
-  Func lp_2d_fast(
-      Func input,
-      Expr height) {
-
-    Func out("gaussian_2d");
-    out = gaussian_blur(input);
-
-    return out;
+    return gaussian;
   }
 
   Func applyUnsharpMask(
@@ -392,38 +415,28 @@ class CameraIspGen
       int outputBpp) {
 
     Func lowPass("lowPass");
-    Func lowPass0("lowPass0");
-
-    lowPass = lp_2d_fast(BoundaryConditions::mirror_image(input,0,width,0,height), height);
+    lowPass = gaussian_blur(input);
 
     Func highPass("hp");
-    highPass(x, y, c) =  cast<float>(input(x, y, c)) - lowPass(x, y, c);
+    highPass(x, y, c) = cast<float>(input(x, y, c)) - lowPass(x, y, c);
 
     Expr cp = select(BGR == 0, c, 2 - c);
-    const int range = (1 << outputBpp) - 1;
 
     Func unsharp("unsharp");
-    unsharp(x,y,c) = lowPass(x,y,c) + highPass(x,y,c) * select(cp == 0, sR,
-							       cp == 1, sG,
-							       sB);
-    
+    unsharp(x,y,c) = lowPass(x,y,cp) + highPass(x,y,cp) * select(cp == 0, sR,
+								 cp == 1, sG,
+								 sB);
+
     Func outputVal("outputVal");
-    outputVal(x,y,c) = clamp( unsharp(x,y,c), 0, range );
 
-    Func sh("sh");
-    sh(x,y,c) = outputVal(x,y,c);
-
-    Expr shr;
-    shr  = sh(x,y,c);
-    
-    Func sharpened("sharpened");
-    if (outputBpp == 8) {
-      sharpened(x, y, c) = cast<uint8_t>(shr);
+    const int range = (1 << outputBpp) - 1;
+    if(outputBpp == 8) {
+      outputVal(x,y,c) = cast<uint8_t>  (clamp(unsharp(x,y,cp), 0, range));
     } else {
-      sharpened(x, y, c) = cast<uint16_t>(shr);
+      outputVal(x,y,c) = cast<uint16_t> (clamp(unsharp(x,y,cp), 0, range));
     }
 
-    return sharpened;
+    return outputVal;
   }
 
  public:
@@ -444,7 +457,7 @@ class CameraIspGen
       Param<float> sharpenningG,
       Param<float> sharpenningB,
       ImageParam ccm,
-      ImageParam toneTable,
+      Func toneTable,
       Param<int> BGR,
       int outputBpp) {
 
@@ -459,32 +472,62 @@ class CameraIspGen
     Func demosaiced("demosaiced");
     Func colorCorrected("ccm");
     Func sharpened("sharpened");
+    Func ispOutput("IspOutput");    
 
     deinterleaved = deinterleave(raw);
-    deinterleaved.compute_root();
     
-    demosaiced = demosaic(deinterleaved, vignetteTableH, vignetteTableV, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR, whiteBalanceGainG, whiteBalanceGainB);
-
+    demosaiced = demosaic(deinterleaved,
+			  vignetteTableH, vignetteTableV,
+			  blackLevelR, blackLevelG, blackLevelB,
+			  whiteBalanceGainR, whiteBalanceGainG, whiteBalanceGainB);
+    
     colorCorrected = applyCCM(demosaiced, ccm);
-    Func toneCorrected("toneCorrected");
+    
     toneCorrected(x, y, c) = toneTable(c, colorCorrected(x, y, c));
 
-    demosaiced.compute_root();
-    toneCorrected.compute_root();
-    
-    Func ispOutput("IspOutput");
+    Func unsharped("unsharped");
     if (Fast) {
       Expr cp = select(BGR == 0, c, 2 - c);
-      ispOutput(x, y, c) = toneCorrected(x , y, cp);
+      ispOutput(x, y, c) = toneCorrected(x, y, cp);
     } else {
-      ispOutput = applyUnsharpMask(toneCorrected, width, height, sR, sG, sB, BGR, outputBpp);
+      Expr cp = select(BGR == 0, c, 2 - c);
+      unsharped = applyUnsharpMask(toneCorrected, width, height, sR, sG, sB, BGR, outputBpp);
+      ispOutput(x, y, c) = unsharped(x,y,cp);
     }
-    
+
+    ispOutput.bound(c,0,3);
     ispOutput.output_buffer()
       .set_stride(0,3)
       .set_stride(2,1)
       .set_bounds(2,0,3);
+
+    // Tell halide that the output is a multiple of 2 (implicit in bayer)
+    ispOutput.bound(x,0,(width/2)*2);
+    ispOutput.bound(y,0,(height/2)*2);
+
+    ispOutput.reorder(c,x,y);
+    ispOutput.gpu_tile(x,y,16,16);
+    ispOutput.compute_root();
     
+    toneCorrected
+      .reorder(c,x,y)
+      .gpu_tile(x,y,16,16)
+      .compute_root();
+
+    demosaiced
+      .reorder(c,x,y)
+      .unroll(c,3)
+      .gpu_tile(x,y,16,16)
+      .compute_root();
+    
+    deinterleaved.reorder(c,x,y);
+    deinterleaved.unroll(x,2).unroll(y,2);
+    deinterleaved.gpu_tile(x,y,16,16);
+    deinterleaved.compute_root();
+
+    vignetteTableH.compute_root();
+    vignetteTableV.compute_root();
+
     return ispOutput;
   }
 
@@ -512,12 +555,11 @@ int main(int argc, char **argv) {
   ImageParam ccm(Float(32), 2, "ccm");
   ImageParam toneTable(UInt(FLAGS_output_bpp), 2, "toneTable");
   Param<int> BGR;
-  
 
   // Pick a target architecture
   Target target = get_target_from_environment();
 
-  target.set_feature( Target::Debug, true);
+  //target.set_feature( Target::Debug, true);
   target.set_feature( Target::Profile, true);
   target.set_feature( Target::OpenCL, true );
   
@@ -534,16 +576,19 @@ int main(int argc, char **argv) {
   Func vignetteTableVM("vvm");
   vignetteTableVM = BoundaryConditions::mirror_image(vignetteTableV);
 
+  Func toneTableM("tone_table_mirrored");
+  toneTableM = BoundaryConditions::mirror_image(toneTable);
+
   Func cameraIsp("cameraIsp");
   cameraIsp = cameraIspGen.generate(
       target, rawM, width, height, vignetteTableHM, vignetteTableVM, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR,
-      whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTable, BGR, FLAGS_output_bpp);
+	whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTableM, BGR, FLAGS_output_bpp);
 
   Func cameraIspFast("cameraIspFast");
   cameraIspFast =
     cameraIspGenFast.generate(
         target, rawM, width, height, vignetteTableHM, vignetteTableVM, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR,
-        whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTable, BGR, FLAGS_output_bpp);
+	  whiteBalanceGainG, whiteBalanceGainB, sharpenningR, sharpenningG, sharpenningB, ccm, toneTableM, BGR, FLAGS_output_bpp);
 
   std::vector<Argument> args = {
     input, width, height, vignetteTableH, vignetteTableV, blackLevelR, blackLevelG, blackLevelB, whiteBalanceGainR, whiteBalanceGainG,
@@ -552,13 +597,21 @@ int main(int argc, char **argv) {
   // Compile the pipelines
   // Use to cameraIsp.print_loop_nest() here to debug loop unrolling
   std::cout << "Halide: " << "Generating " << FLAGS_output_bpp << " bit isp" << std::endl;
-  cameraIsp.compile_to_static_library("CameraIspGen" + to_string(FLAGS_output_bpp), args, "CameraIspGen" + to_string(FLAGS_output_bpp) , target);
-  cameraIsp.compile_to_assembly("CameraIspGen" + to_string(FLAGS_output_bpp) + ".s", args, target);
+
+  cameraIsp.compile_to_static_library("CameraIspGen" + to_string(FLAGS_output_bpp), args,
+				      "CameraIspGen" + to_string(FLAGS_output_bpp), target);
+
+  //cameraIsp.compile_to_assembly("CameraIspGen" + to_string(FLAGS_output_bpp) + ".s", args, target);
+
   cameraIsp.compile_to_lowered_stmt("CameraIspGen" + to_string(FLAGS_output_bpp) + ".html", args, HTML , target);
 
   
   std::cout << "Halide: " << "Generating " << FLAGS_output_bpp << " bit fastest isp" << std::endl;
-  cameraIspFast.compile_to_static_library("CameraIspGenFast" + to_string(FLAGS_output_bpp), args, "CameraIspGenFast" + to_string(FLAGS_output_bpp) , target);
-  cameraIspFast.compile_to_assembly("CameraIspGenFast" + to_string(FLAGS_output_bpp) + ".s", args, target);
+
+  cameraIspFast.compile_to_static_library("CameraIspGenFast" + to_string(FLAGS_output_bpp),
+					  args, "CameraIspGenFast" + to_string(FLAGS_output_bpp) , target);
+  
+  //cameraIspFast.compile_to_assembly("CameraIspGenFast" + to_string(FLAGS_output_bpp) + ".s", args, target);
+
   return EXIT_SUCCESS;
 }

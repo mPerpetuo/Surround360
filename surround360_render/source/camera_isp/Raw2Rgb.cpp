@@ -13,7 +13,7 @@
 #include <iostream>
 #include <string>
 #include <ctime>
-#include <chrono>
+
 
 #include "CameraIsp.h"
 #ifdef USE_HALIDE
@@ -77,7 +77,8 @@ void runPipeline(
   CameraIsp* cameraIsp,
   Mat& inputImage,
   Mat& outputImage,
-  string outputImagePath) {
+  string outputImagePath,
+  bool write_file = true) {
   cameraIsp->addBlackLevelOffset(FLAGS_black_level_offset);
   cameraIsp->loadImage(inputImage);
 
@@ -86,7 +87,9 @@ void runPipeline(
   double endTime = getCurrTimeSec();
   LOG(INFO) << "Runtime = " << (endTime - startTime) * 1000.0 << "ms" << endl;
 
-  imwriteExceptionOnFail(outputImagePath, outputImage);
+  if(write_file) {
+    imwriteExceptionOnFail(outputImagePath, outputImage);
+  }
 }
 
 int main(int argc, char* argv[]) {
@@ -144,19 +147,7 @@ int main(int argc, char* argv[]) {
     if (FLAGS_accelerate) {
       std::cout << "Running Halide Pipeline" << std::endl;
       CameraIspPipe cameraIsp(json, FLAGS_fast, FLAGS_output_bpp);
-      using ns = chrono::nanoseconds;
-      using get_time = chrono::steady_clock;
-
-      auto begin = get_time::now();
-
-      runPipeline(&cameraIsp, inputImage16, outputImage, FLAGS_output_image_path);
-
-      auto end = get_time::now();
-
-      auto diff = end - begin;
-
-      std::cout << "Elapsed time " << (float)chrono::duration_cast<ns>(diff).count() / 1000000 << std::endl;
-
+      runPipeline(&cameraIsp, inputImage16, outputImage, FLAGS_output_image_path, true);
     } else {
 #else
     {
@@ -165,13 +156,7 @@ int main(int argc, char* argv[]) {
       CameraIsp cameraIsp(json, FLAGS_output_bpp);
       cameraIsp.setDemosaicFilter(FLAGS_demosaic_filter);
       cameraIsp.setResize(FLAGS_resize);
-      using ns = chrono::nanoseconds;
-      using get_time = chrono::steady_clock;
-      auto begin = get_time::now();
       runPipeline(&cameraIsp, inputImage16, outputImage, FLAGS_output_image_path);
-      auto end = get_time::now();
-      auto diff = end-begin;
-      std::cout << "Elapsed time " << (float)chrono::duration_cast<ns>(diff).count() / 1000000 << std::endl;
     }
   } else {
     throw VrCamException("Unable to open " + FLAGS_input_image_path);
